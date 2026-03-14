@@ -28,27 +28,23 @@ def get_canny_edges(image_path, low_threshold=100, high_threshold=200):
 # 测试运行：你需要准备一张名为 'test_orange.jpg' 的本地图片
 # edge_image = get_canny_edges("test_orange.jpg")=
 
-def generate_with_controlnet(image_path, prompt= "A highly detailed, hyper-realistic macro photography of a fresh orange cross section, juicy, 4k resolution"):
+def generate_with_controlnet(edge_image_path, prompt= "A highly detailed, hyper-realistic macro photography of a fresh orange cross section, juicy, 4k resolution"):
     print("正在加载 ControlNet 边缘模型和 Stable Diffusion...")
-    edge_image_path=get_canny_edges(image_path, low_threshold=100, high_threshold=200)
     # 1. 加载专门认“边缘线稿”的 ControlNet 模型
     controlnet = ControlNetModel.from_pretrained(
         "lllyasviel/sd-controlnet-canny",
         torch_dtype=torch.float16
     )
 
-    # 2. 将 ControlNet 塞进 Stable Diffusion 管道里
     pipe = StableDiffusionControlNetPipeline.from_pretrained(
         "runwayml/stable-diffusion-v1-5",
         controlnet=controlnet,
         torch_dtype=torch.float16
     ).to("cuda")  # 送入显卡加速
 
-    # 3. 读取我们刚才生成的黑白线稿图
     edge_image = Image.open(edge_image_path)
 
     print("AI 开始根据线稿作画...")
-    # 4. 让 AI 开始生成！它必须严格遵守 edge_image 的线条轮廓
     image = pipe(
         prompt=prompt,
         image=edge_image,
@@ -56,7 +52,7 @@ def generate_with_controlnet(image_path, prompt= "A highly detailed, hyper-reali
         guidance_scale=7.5  # 听从提示词的程度
     ).images[0]
 
-    image.save("ai_generated_orange.png")
+    image.save("./ai_generate/ai_generated_orange.png")
     print("生成完毕！已保存为 ai_generated_orange.png")
     return os.path.abspath("ai_generated_orange.png")
 # 测试运行（假设上一步生成的线稿叫 orange_edges.png）
