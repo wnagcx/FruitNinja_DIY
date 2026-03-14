@@ -410,7 +410,7 @@ if __name__ == "__main__":
 
             save_img(rendering, args.output_path, 0, f"v{i}_init_")
 
-            if i % 10 == 0:
+            if j % 10 == 0:
                 cur_img = Image.open(os.path.join(args.output_path, f"v{i}_init_0.png"))
                 if args.model=="local":
                     try:
@@ -543,7 +543,7 @@ if __name__ == "__main__":
 
             save_img(rendering, args.output_path, 0, f"h{i}_init_")
 
-            if i % 10 == 0:
+            if j % 10 == 0:
                 cur_img = Image.open(os.path.join(args.output_path, f"h{i}_init_0.png"))
                 # 【修复点 4】：语法错误修复
                 if args.model == "local":
