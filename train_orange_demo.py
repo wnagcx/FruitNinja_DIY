@@ -35,9 +35,10 @@ from diffusers import StableDiffusionControlNetPipeline, ControlNetModel
 from cross_section import *
 from new_sds_demo import *
 
-SD_MODEL_VERTICAL = "./local_models/controlnet-canny"
-SD_MODEL_HORIZONTAL = "./local_models/controlnet-canny"
+CE_MODEL_VERTICAL = "./local_models/controlnet-canny"
 
+SD_MODEL_VERTICAL="stabilityai/stable-diffusion-2-depth"
+SD_MODEL_HORIZONTAL="stabilityai/stable-diffusion-2-depth"
 
 class PipelineParamsNoparse:
     """Same as PipelineParams but without argument parser."""
@@ -310,16 +311,17 @@ if __name__ == "__main__":
     now_pic_v=0
     now_pic_h=0
     if args.model=="CED":
-        controlnet = ControlNetModel.from_pretrained(SD_MODEL_VERTICAL, torch_dtype=torch.float16)
-        # pipe_v = StableDiffusionDepth2ImgPipeline.from_pretrained(SD_MODEL_VERTICAL).to("cuda:2")
+        controlnet = ControlNetModel.from_pretrained(CE_MODEL_VERTICAL, torch_dtype=torch.float16)
 
-        pipe_v = StableDiffusionControlNetPipeline.from_pretrained(
+        pipe_d_v = StableDiffusionDepth2ImgPipeline.from_pretrained(SD_MODEL_VERTICAL).to("cuda:2")
+        pipe_d_h = StableDiffusionDepth2ImgPipeline.from_pretrained(SD_MODEL_HORIZONTAL).to("cuda:1")
+
+        pipe_ce = StableDiffusionControlNetPipeline.from_pretrained(
             "runwayml/stable-diffusion-v1-5",
             controlnet=controlnet,
             torch_dtype=torch.float16
         ).to("cuda:0")
-        # pipe_h = StableDiffusionDepth2ImgPipeline.from_pretrained(SD_MODEL_HORIZONTAL).to("cuda:1")
-        pipe_h =pipe_v
+
     for j in range(30):
         density_and_prune(j)
         print(f"Starting iteration {j}")
@@ -408,6 +410,15 @@ if __name__ == "__main__":
                 align_corners=False
             ).squeeze(0)
 
+
+            depth_map = depth_map[None, :, :, :]
+            depth_map = depth_map.to("cuda:2")
+            depth_map = pipe.depth_estimator(depth_map).predicted_depth
+            target_size = (512, 512)
+            depth_map_tensor_resized = F.interpolate(depth_map.unsqueeze(0), size=target_size, mode='bilinear',
+                                                     align_corners=False)
+            depth_map_tensor_resized = depth_map_tensor_resized.squeeze(0)
+
             save_img(rendering, args.output_path, 0, f"v{i}_init_")
 
             if j % 10 == 0:
@@ -420,9 +431,16 @@ if __name__ == "__main__":
                         ref = Image.open(os.path.join(args.input_path, f"v{now_pic_v}.png"))
                     now_pic_v += 1
                 if args.model=="CED":
-                    pipe = pipe_v
-                    canny_condition_img_path = CED.get_canny_edges(os.path.join(args.output_path, f"v{i}_init_0.png"))
-                    ref = one_step_c_orange(cur_img, canny_condition_img_path, 30 - j // 100, pipe, "vertical")
+                    if j>=100:
+                        pipe = pipe_ce
+                        canny_condition_img_path = CED.get_canny_edges(
+                            os.path.join(args.output_path, f"v{i}_init_0.png"))
+                        ref = one_step_c_orange(cur_img, canny_condition_img_path, 30 - j // 100, pipe, "vertical")
+                        ref.save(os.path.join(args.output_path, f"h{i}_ref.png"))
+                    else:
+                        cur_img = Image.open(os.path.join(args.output_path, f"v{i}_init_0.png"))
+                        ref = one_step_sds_orange(cur_img, depth_map_tensor_resized, 30 - j // 100, pipe, "vertical")
+                        ref.save(os.path.join(args.output_path, f"v{i}_ref.png"))
                 ref.save(os.path.join(args.output_path, f"v{i}_ref.png"))
             else:
                 ref = Image.open(os.path.join(args.output_path, f"v{i}_ref.png"))
@@ -541,6 +559,12 @@ if __name__ == "__main__":
                 align_corners=False
             ).squeeze(0)
 
+            depth_map = depth_map[None,:,:,:]
+            depth_map = depth_map.to("cuda:1")
+            depth_map = pipe.depth_estimator(depth_map).predicted_depth
+            target_size = (512, 512)
+            depth_map_tensor_resized = F.interpolate(depth_map.unsqueeze(0), size=target_size, mode='bilinear', align_corners=False)
+            depth_map_tensor_resized = depth_map_tensor_resized.squeeze(0)
             save_img(rendering, args.output_path, 0, f"h{i}_init_")
 
             if j % 10 == 0:
@@ -555,9 +579,17 @@ if __name__ == "__main__":
                         now_pic_h = now_pic_h + 1
                     ref.save(os.path.join(args.output_path, f"h{i}_ref.png"))
                 if args.model == "CED":
-                    pipe=pipe_h
-                    canny_condition_img_path=CED.get_canny_edges(os.path.join(args.output_path, f"h{i}_init_0.png"))
-                    ref=one_step_c_orange(cur_img,canny_condition_img_path,30 - j//100, pipe, "horizontal")
+                    if j>=100:
+                        pipe = pipe_ce
+                        canny_condition_img_path = CED.get_canny_edges(
+                            os.path.join(args.output_path, f"h{i}_init_0.png"))
+                        ref = one_step_c_orange(cur_img, canny_condition_img_path, 30 - j // 100, pipe, "horizontal")
+                        ref.save(os.path.join(args.output_path, f"h{i}_ref.png"))
+                    else :
+
+                        cur_img = Image.open(os.path.join(args.output_path, f"h{i}_init_0.png"))
+                        ref = one_step_sds_orange(cur_img, depth_map_tensor_resized, 30 - j // 100, pipe, "horizontal")
+                        ref.save(os.path.join(args.output_path, f"h{i}_ref.png"))
             else:
                 ref = Image.open(os.path.join(args.output_path, f"h{i}_ref.png"))
 

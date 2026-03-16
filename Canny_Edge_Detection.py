@@ -28,7 +28,7 @@ def get_canny_edges(image_path, low_threshold=100, high_threshold=200):
 # 测试运行：你需要准备一张名为 'test_orange.jpg' 的本地图片
 # edge_image = get_canny_edges("test_orange.jpg")=
 
-def generate_with_controlnet(edge_image_path, prompt= "A highly detailed, hyper-realistic macro photography of a fresh orange cross section, juicy, 4k resolution"):
+def generate_with_controlnet(edge_image_path, prompt= "A highly detailed, hyper-realistic macro photography of a fresh orange cross section, juicy, 4k resolution,solid white background"):
     print("正在加载 ControlNet 边缘模型和 Stable Diffusion...")
     # 1. 加载专门认“边缘线稿”的 ControlNet 模型
     controlnet = ControlNetModel.from_pretrained(
