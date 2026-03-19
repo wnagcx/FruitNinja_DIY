@@ -323,7 +323,7 @@ if __name__ == "__main__":
             torch_dtype=torch.float16
         ).to("cuda:0")
 
-    for j in range(30):
+    for j in range(3000):
         density_and_prune(j)
         print(f"Starting iteration {j}")
 
@@ -420,7 +420,7 @@ if __name__ == "__main__":
 
             save_img(rendering, args.output_path, 0, f"v{i}_init_")
 
-            if j % 10 == 0:
+            if j % 30 == 0:
                 cur_img = Image.open(os.path.join(args.output_path, f"v{i}_init_0.png"))
                 if args.model=="local":
                     try:
@@ -430,7 +430,7 @@ if __name__ == "__main__":
                         ref = Image.open(os.path.join(args.input_path, f"v{now_pic_v}.png"))
                     now_pic_v += 1
                 if args.model=="CED":
-                    if j>=100:
+                    if j>=300:
                         canny_condition_img_path = CED.get_canny_edges(
                             os.path.join(args.output_path, f"v{i}_init_0.png"))
                         ref = one_step_c_orange(cur_img, canny_condition_img_path, 30 - j // 100, pipe_ce, "vertical")
@@ -569,7 +569,7 @@ if __name__ == "__main__":
             depth_map_tensor_resized = depth_map_tensor_resized.squeeze(0)
             save_img(rendering, args.output_path, 0, f"h{i}_init_")
 
-            if j % 10 == 0:
+            if j % 30 == 0:
                 cur_img = Image.open(os.path.join(args.output_path, f"h{i}_init_0.png"))
                 if args.model == "local":
                     try:
@@ -580,7 +580,7 @@ if __name__ == "__main__":
                         now_pic_h = now_pic_h + 1
                     ref.save(os.path.join(args.output_path, f"h{i}_ref.png"))
                 if args.model == "CED":
-                    if j>=100:
+                    if j>=300:
                         canny_condition_img_path = CED.get_canny_edges(
                             os.path.join(args.output_path, f"h{i}_init_0.png"))
                         ref = one_step_c_orange(cur_img, canny_condition_img_path, 30 - j // 100, pipe_ce, "horizontal")
