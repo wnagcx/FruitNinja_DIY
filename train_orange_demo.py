@@ -37,8 +37,8 @@ from new_sds_demo import *
 
 CE_MODEL_VERTICAL = "./local_models/controlnet-canny"
 
-SD_MODEL_VERTICAL="stabilityai/stable-diffusion-2-depth"
-SD_MODEL_HORIZONTAL="stabilityai/stable-diffusion-2-depth"
+SD_MODEL_VERTICAL="./local_models/sd2-depth"
+SD_MODEL_HORIZONTAL="./local_models/sd2-depth"
 
 class PipelineParamsNoparse:
     """Same as PipelineParams but without argument parser."""
@@ -297,6 +297,7 @@ if __name__ == "__main__":
     def get_ssim_loss(rendering, ground_truth):
         rendering = rendering.unsqueeze(0)
         ground_truth = ground_truth.unsqueeze(0)
+
         return 1 - ssim(
             rendering,
             ground_truth,
@@ -313,8 +314,8 @@ if __name__ == "__main__":
     if args.model=="CED":
         controlnet = ControlNetModel.from_pretrained(CE_MODEL_VERTICAL, torch_dtype=torch.float16)
 
-        pipe_d_v = StableDiffusionDepth2ImgPipeline.from_pretrained(SD_MODEL_VERTICAL).to("cuda:2")
-        pipe_d_h = StableDiffusionDepth2ImgPipeline.from_pretrained(SD_MODEL_HORIZONTAL).to("cuda:1")
+        pipe_d_v = StableDiffusionDepth2ImgPipeline.from_pretrained(SD_MODEL_VERTICAL).to("cuda:0")
+        pipe_d_h = StableDiffusionDepth2ImgPipeline.from_pretrained(SD_MODEL_HORIZONTAL).to("cuda:0")
 
         pipe_ce = StableDiffusionControlNetPipeline.from_pretrained(
             "runwayml/stable-diffusion-v1-5",
@@ -389,7 +390,6 @@ if __name__ == "__main__":
             )
             colors_precomp_cs = convert_SH(shs_cs, cur_camera, gaussians, pos_cs, None)
 
-            # 【修复点 1】：解包为 2 个返回值
             rendering, raddi = rasterize(
                 means3D=pos_cs,
                 means2D=init_screen_points_cs,
@@ -401,20 +401,19 @@ if __name__ == "__main__":
                 cov3D_precomp=cov3D_cs
             )
 
-            # 【修复点 2】：清理冗余的维度变换
-            target_size = (512, 512)
-            depth_map_tensor_resized = F.interpolate(
+            target_size = (384, 384)
+            depth_map = rendering
+            depth_map = F.interpolate(
                 rendering.unsqueeze(0),
                 size=target_size,
                 mode='bilinear',
                 align_corners=False
             ).squeeze(0)
 
-
+            pipe=pipe_d_v
             depth_map = depth_map[None, :, :, :]
-            depth_map = depth_map.to("cuda:2")
+            depth_map = depth_map.to("cuda:0")
             depth_map = pipe.depth_estimator(depth_map).predicted_depth
-            target_size = (512, 512)
             depth_map_tensor_resized = F.interpolate(depth_map.unsqueeze(0), size=target_size, mode='bilinear',
                                                      align_corners=False)
             depth_map_tensor_resized = depth_map_tensor_resized.squeeze(0)
@@ -432,10 +431,9 @@ if __name__ == "__main__":
                     now_pic_v += 1
                 if args.model=="CED":
                     if j>=100:
-                        pipe = pipe_ce
                         canny_condition_img_path = CED.get_canny_edges(
                             os.path.join(args.output_path, f"v{i}_init_0.png"))
-                        ref = one_step_c_orange(cur_img, canny_condition_img_path, 30 - j // 100, pipe, "vertical")
+                        ref = one_step_c_orange(cur_img, canny_condition_img_path, 30 - j // 100, pipe_ce, "vertical")
                         ref.save(os.path.join(args.output_path, f"h{i}_ref.png"))
                     else:
                         cur_img = Image.open(os.path.join(args.output_path, f"v{i}_init_0.png"))
@@ -445,12 +443,9 @@ if __name__ == "__main__":
             else:
                 ref = Image.open(os.path.join(args.output_path, f"v{i}_ref.png"))
 
-            # 【修复点 3】：处理真值图的通道数和分辨率，对齐渲染图
             ground_truth_tensor = transform(ref).to(device)
-            # 统一为 RGB 3通道
             if ground_truth_tensor.shape[0] == 4:
                 ground_truth_tensor = ground_truth_tensor[:3, :, :]
-            # 统一分辨率为 512x512
             if ground_truth_tensor.shape[1:] != target_size:
                 ground_truth_tensor = F.interpolate(
                     ground_truth_tensor.unsqueeze(0),
@@ -458,9 +453,17 @@ if __name__ == "__main__":
                     mode='bilinear',
                     align_corners=False
                 ).squeeze(0)
-
-            total_loss = 0.7 * get_ssim_loss(rendering, ground_truth_tensor)
-            total_loss += 0.3 * torch.nn.functional.mse_loss(rendering, ground_truth_tensor)
+            tmp_rendering=rendering
+            tmp_rendering.unsqueeze_(0)
+            tmp_rendering = F.interpolate(
+                tmp_rendering,
+                size=ground_truth_tensor.shape[-2:],
+                mode='bilinear',
+                align_corners=False
+            )
+            tmp_rendering.squeeze_(0)
+            total_loss = 0.7 * get_ssim_loss(tmp_rendering, ground_truth_tensor)
+            total_loss += 0.3 * torch.nn.functional.mse_loss(tmp_rendering, ground_truth_tensor)
             total_loss.backward()
             output_radii = torch.zeros(pos.shape[0], dtype=torch.int32).to(device)
             output_radii[mask] = raddi
@@ -538,7 +541,6 @@ if __name__ == "__main__":
                 cur_camera, gaussians, pipeline, background, image_height=512, image_width=512
             )
 
-            # 【修复点 1】：解包为 2 个返回值
             rendering, raddi = rasterize(
                 means3D=pos_cs,
                 means2D=init_screen_points_cs,
@@ -550,15 +552,15 @@ if __name__ == "__main__":
                 cov3D_precomp=cov3D_cs
             )
 
-            # 【修复点 2】：清理冗余维度变换
-            target_size = (512, 512)
-            depth_map_tensor_resized = F.interpolate(
+            target_size = (384, 384)
+            depth_map = rendering
+            depth_map= F.interpolate(
                 rendering.unsqueeze(0),
                 size=target_size,
                 mode='bilinear',
                 align_corners=False
             ).squeeze(0)
-
+            pipe=pipe_d_h
             depth_map = depth_map[None,:,:,:]
             depth_map = depth_map.to("cuda:1")
             depth_map = pipe.depth_estimator(depth_map).predicted_depth
@@ -569,7 +571,6 @@ if __name__ == "__main__":
 
             if j % 10 == 0:
                 cur_img = Image.open(os.path.join(args.output_path, f"h{i}_init_0.png"))
-                # 【修复点 4】：语法错误修复
                 if args.model == "local":
                     try:
                         ref = Image.open(os.path.join(args.input_path, f"h{now_pic_h}.png"))
@@ -580,10 +581,9 @@ if __name__ == "__main__":
                     ref.save(os.path.join(args.output_path, f"h{i}_ref.png"))
                 if args.model == "CED":
                     if j>=100:
-                        pipe = pipe_ce
                         canny_condition_img_path = CED.get_canny_edges(
                             os.path.join(args.output_path, f"h{i}_init_0.png"))
-                        ref = one_step_c_orange(cur_img, canny_condition_img_path, 30 - j // 100, pipe, "horizontal")
+                        ref = one_step_c_orange(cur_img, canny_condition_img_path, 30 - j // 100, pipe_ce, "horizontal")
                         ref.save(os.path.join(args.output_path, f"h{i}_ref.png"))
                     else :
 
@@ -593,7 +593,6 @@ if __name__ == "__main__":
             else:
                 ref = Image.open(os.path.join(args.output_path, f"h{i}_ref.png"))
 
-            # 【修复点 3】：处理真值图的通道数和分辨率
             ground_truth_tensor = transform(ref).to(device)
             if ground_truth_tensor.shape[0] == 4:
                 ground_truth_tensor = ground_truth_tensor[:3, :, :]
@@ -604,9 +603,17 @@ if __name__ == "__main__":
                     mode='bilinear',
                     align_corners=False
                 ).squeeze(0)
-
-            total_loss = 0.7 * get_ssim_loss(rendering, ground_truth_tensor)
-            total_loss += 0.3 * torch.nn.functional.mse_loss(rendering, ground_truth_tensor)
+            tmp_rendering = rendering
+            tmp_rendering.unsqueeze_(0)
+            tmp_rendering = F.interpolate(
+                tmp_rendering,
+                size=ground_truth_tensor.shape[-2:],
+                mode='bilinear',
+                align_corners=False
+            )
+            tmp_rendering.squeeze_(0)
+            total_loss = 0.7 * get_ssim_loss(tmp_rendering, ground_truth_tensor)
+            total_loss += 0.3 * torch.nn.functional.mse_loss(tmp_rendering, ground_truth_tensor)
             total_loss.backward()
             output_radii = torch.zeros(pos.shape[0], dtype=torch.int32).to(device)
             output_radii[mask_suf] = raddi
@@ -664,7 +671,6 @@ if __name__ == "__main__":
                 cur_camera, gaussians_ori, pipeline, background, image_height=512, image_width=512
             )
 
-            # 【修复点 1】：把底部的解包全部改成两个变量
             rendering_ori, radii_ori = rasterize(
                 means3D=pos,
                 means2D=init_screen_points,
@@ -698,7 +704,6 @@ if __name__ == "__main__":
                     cur_camera, gaussians, pipeline, background, image_height=512, image_width=512
                 )
 
-                # 【修复点 1】：解包为两个变量
                 rendering, radii = rasterize(
                     means3D=pos,
                     means2D=init_screen_points,

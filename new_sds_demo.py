@@ -75,6 +75,60 @@ def return_img(local_latent, pipe):
     image_local = image_local.detach()
     return pipe.image_processor.postprocess(image_local)[0]
 
+
+def get_depth_sds(pipe, prompt, depth_map_tensor, init_latents, t_range, guidance_scale=10.0):
+    device = pipe.device
+    dtype = pipe.dtype
+
+    text_input = pipe.tokenizer(
+        prompt, padding="max_length", max_length=pipe.tokenizer.model_max_length, truncation=True, return_tensors="pt"
+    )
+    text_embeddings = pipe.text_encoder(text_input.input_ids.to(device))[0]
+
+    uncond_input = pipe.tokenizer(
+        ["nested orange, double rind, extra slices, messy background, outside flesh, radial lines, mutation"],
+        padding="max_length", max_length=pipe.tokenizer.model_max_length, truncation=True, return_tensors="pt"
+    )
+    uncond_embeddings = pipe.text_encoder(uncond_input.input_ids.to(device))[0]
+    text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
+
+    with torch.no_grad():
+        H, W = depth_map_tensor.shape[-2], depth_map_tensor.shape[-1]
+        depth_map_4d = depth_map_tensor.view(1, 1, H, W).to(device)
+
+        depth_mask = F.interpolate(
+            depth_map_4d,
+            size=(init_latents.shape[2], init_latents.shape[3]),
+            mode="bicubic",
+            align_corners=False,
+        )
+        depth_min = torch.amin(depth_mask, dim=[1, 2, 3], keepdim=True)
+        depth_max = torch.amax(depth_mask, dim=[1, 2, 3], keepdim=True)
+        depth_mask = 2.0 * (depth_mask - depth_min) / (depth_max - depth_min) - 1.0
+        depth_mask = depth_mask.to(dtype)
+
+        depth_mask_input = torch.cat([depth_mask] * 2)
+
+    t_min, t_max = int(t_range[0] * 1000), int(t_range[1] * 1000)
+    t = torch.randint(t_min, t_max, (1,), device=device).long()
+    noise = torch.randn_like(init_latents)
+    latents_noisy = pipe.scheduler.add_noise(init_latents, noise, t)
+
+    latent_model_input = torch.cat([latents_noisy] * 2)
+    latent_model_input = torch.cat([latent_model_input, depth_mask_input], dim=1)
+
+    with torch.no_grad():
+        noise_pred = pipe.unet(
+            latent_model_input,
+            t,
+            encoder_hidden_states=text_embeddings,
+        ).sample
+
+    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+    grad = (noise_pred - noise)
+    return grad
 def one_step_sds_orange(image, depth, total_epochs, pipe, view_cut):
     depth = depth.to(pipe.device)
     cur_t = [0.02, 0.98]
@@ -87,23 +141,24 @@ def one_step_sds_orange(image, depth, total_epochs, pipe, view_cut):
     init_latents = init_latents.detach().clone().requires_grad_(True)
     init_latents.requires_grad = True
     optimizer = optim.Adam([init_latents], lr=0.1)  # Choose a learning rate
+
+    prompt = f"A single, highly detailed {view_cut} cross section of an orange, solid white background, centered, realistic fruit flesh"
     for e in range(total_epochs):
         optimizer.zero_grad()
         step_ratio = min(1, e / total_epochs)
-        grad = pipe.get_sds_latent(
-            f"a photo of the {view_cut} cross section of an orange, detailed",
-            image=image_tensor,
-            depth_map=depth,
-            strength=0.1,
-            num_inference_steps=100,
-            init_latents=init_latents,
-            t_range = cur_t,
-            guidance_scale=10,
-            step_ratio=None
+        grad = get_depth_sds(
+            pipe=pipe,
+            prompt=prompt,
+            depth_map_tensor=depth,
+            init_latents=init_latents.to(pipe.dtype),
+            t_range=cur_t,
+            guidance_scale=10.0
         )
+
+        grad = grad.to(torch.float32)
         grad.clamp(-clip, clip)
         target = (init_latents - grad).detach()
-        loss = 0.5 * F.mse_loss(init_latents.float(), target, reduction=' sum') / init_latents.shape[0]
+        loss = 0.5 * F.mse_loss(init_latents.float(), target, reduction='sum') / init_latents.shape[0]
         loss.backward()
         optimizer.step()
     return return_img(init_latents, pipe)
