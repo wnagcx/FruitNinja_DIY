@@ -80,17 +80,32 @@ def get_depth_sds(pipe, prompt, depth_map_tensor, init_latents, t_range, guidanc
     device = pipe.device
     dtype = pipe.dtype
 
-    text_input = pipe.tokenizer(
-        prompt, padding="max_length", max_length=pipe.tokenizer.model_max_length, truncation=True, return_tensors="pt"
-    )
-    text_embeddings = pipe.text_encoder(text_input.input_ids.to(device))[0]
+    # [Original Code - commented out for memory optimization comparison]
+    # text_input = pipe.tokenizer(
+    #     prompt, padding="max_length", max_length=pipe.tokenizer.model_max_length, truncation=True, return_tensors="pt"
+    # )
+    # text_embeddings = pipe.text_encoder(text_input.input_ids.to(device))[0]
+    #
+    # uncond_input = pipe.tokenizer(
+    #     ["nested orange, double rind, extra slices, messy background, outside flesh, radial lines, mutation"],
+    #     padding="max_length", max_length=pipe.tokenizer.model_max_length, truncation=True, return_tensors="pt"
+    # )
+    # uncond_embeddings = pipe.text_encoder(uncond_input.input_ids.to(device))[0]
+    # text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
 
-    uncond_input = pipe.tokenizer(
-        ["nested orange, double rind, extra slices, messy background, outside flesh, radial lines, mutation"],
-        padding="max_length", max_length=pipe.tokenizer.model_max_length, truncation=True, return_tensors="pt"
-    )
-    uncond_embeddings = pipe.text_encoder(uncond_input.input_ids.to(device))[0]
-    text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
+    # [Change 8] Text encoding is pure inference here, so wrap it in no_grad to avoid extra graph retention.
+    with torch.no_grad():
+        text_input = pipe.tokenizer(
+            prompt, padding="max_length", max_length=pipe.tokenizer.model_max_length, truncation=True, return_tensors="pt"
+        )
+        text_embeddings = pipe.text_encoder(text_input.input_ids.to(device))[0]
+
+        uncond_input = pipe.tokenizer(
+            ["nested orange, double rind, extra slices, messy background, outside flesh, radial lines, mutation"],
+            padding="max_length", max_length=pipe.tokenizer.model_max_length, truncation=True, return_tensors="pt"
+        )
+        uncond_embeddings = pipe.text_encoder(uncond_input.input_ids.to(device))[0]
+        text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
 
     with torch.no_grad():
         H, W = depth_map_tensor.shape[-2], depth_map_tensor.shape[-1]
@@ -133,11 +148,24 @@ def one_step_sds_orange(image, depth, total_epochs, pipe, view_cut):
     depth = depth.to(pipe.device)
     cur_t = [0.02, 0.98]
     clip = 1
+    # [Original Code - commented out for dtype compatibility comparison]
+    # image_tensor = pipe.image_processor.preprocess(image)
+    # image_tensor = image_tensor.to(pipe.device)
+
+    # [Change 9.1] Match image tensor dtype to the half-precision pipeline before VAE encoding.
     image_tensor = pipe.image_processor.preprocess(image)
-    image_tensor = image_tensor.to(pipe.device)
-    init_latents = pipe.vae.encode(image_tensor)
-    init_latents = retrieve_latents(init_latents)
-    init_latents = pipe.vae.config.scaling_factor * init_latents
+    image_tensor = image_tensor.to(device=pipe.device, dtype=pipe.dtype)
+
+    # [Original Code - commented out for memory optimization comparison]
+    # init_latents = pipe.vae.encode(image_tensor)
+    # init_latents = retrieve_latents(init_latents)
+    # init_latents = pipe.vae.config.scaling_factor * init_latents
+
+    # [Change 9] VAE encoding is only used to initialize latent optimization, so no_grad is sufficient.
+    with torch.no_grad():
+        init_latents = pipe.vae.encode(image_tensor)
+        init_latents = retrieve_latents(init_latents)
+        init_latents = pipe.vae.config.scaling_factor * init_latents
     init_latents = init_latents.detach().clone().requires_grad_(True)
     init_latents.requires_grad = True
     optimizer = optim.Adam([init_latents], lr=0.1)  # Choose a learning rate
@@ -167,17 +195,32 @@ def one_step_sds_orange(image, depth, total_epochs, pipe, view_cut):
 def get_controlnet_sds(pipe, prompt, control_image, init_latents, t_range, guidance_scale=10.0):
     device = pipe.device
 
-    text_input = pipe.tokenizer(
-        prompt, padding="max_length", max_length=pipe.tokenizer.model_max_length, truncation=True, return_tensors="pt"
-    )
-    text_embeddings = pipe.text_encoder(text_input.input_ids.to(device))[0]
+    # [Original Code - commented out for memory optimization comparison]
+    # text_input = pipe.tokenizer(
+    #     prompt, padding="max_length", max_length=pipe.tokenizer.model_max_length, truncation=True, return_tensors="pt"
+    # )
+    # text_embeddings = pipe.text_encoder(text_input.input_ids.to(device))[0]
+    #
+    # uncond_input = pipe.tokenizer(
+    #     [""], padding="max_length", max_length=pipe.tokenizer.model_max_length, truncation=True, return_tensors="pt"
+    # )
+    # uncond_embeddings = pipe.text_encoder(uncond_input.input_ids.to(device))[0]
+    #
+    # text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
 
-    uncond_input = pipe.tokenizer(
-        [""], padding="max_length", max_length=pipe.tokenizer.model_max_length, truncation=True, return_tensors="pt"
-    )
-    uncond_embeddings = pipe.text_encoder(uncond_input.input_ids.to(device))[0]
+    # [Change 10] ControlNet text encoding is also inference-only and should not keep gradients.
+    with torch.no_grad():
+        text_input = pipe.tokenizer(
+            prompt, padding="max_length", max_length=pipe.tokenizer.model_max_length, truncation=True, return_tensors="pt"
+        )
+        text_embeddings = pipe.text_encoder(text_input.input_ids.to(device))[0]
 
-    text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
+        uncond_input = pipe.tokenizer(
+            [""], padding="max_length", max_length=pipe.tokenizer.model_max_length, truncation=True, return_tensors="pt"
+        )
+        uncond_embeddings = pipe.text_encoder(uncond_input.input_ids.to(device))[0]
+
+        text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
 
     # 2. 随机采样时间步 t
     t_min, t_max = int(t_range[0] * 1000), int(t_range[1] * 1000)
@@ -218,10 +261,20 @@ def one_step_c_orange(image, image_path, total_epochs, pipe, view_cut):
     cur_t = [0.02, 0.98]
     clip = 1
 
-    # 获取边缘线稿
-    canny_image_path = CED.generate_with_controlnet(image_path)
-    canny_image = Image.open(canny_image_path)
+    # [Original Code - commented out for memory optimization comparison]
+    # # 获取边缘线稿
+    # canny_image_path = CED.generate_with_controlnet(image_path)
+    # canny_image = Image.open(canny_image_path)
 
+    # [Change 11] Reuse the edge image produced by the caller instead of loading another
+    # ControlNet pipeline inside Canny_Edge_Detection.py.
+    canny_image = Image.open(image_path)
+
+    # [Original Code - commented out for input dtype consistency comparison]
+    # control_image = pipe.image_processor.preprocess(canny_image).to(device=pipe.device, dtype=pipe.dtype)
+    # image_tensor = pipe.image_processor.preprocess(image).to(device=pipe.device, dtype=pipe.dtype)
+
+    # [Change 11.1] Explicitly align all pipeline inputs with the pipeline precision.
     control_image = pipe.image_processor.preprocess(canny_image).to(device=pipe.device, dtype=pipe.dtype)
     image_tensor = pipe.image_processor.preprocess(image).to(device=pipe.device, dtype=pipe.dtype)
 

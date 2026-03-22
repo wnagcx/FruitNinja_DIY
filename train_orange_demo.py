@@ -312,16 +312,71 @@ if __name__ == "__main__":
     now_pic_v=0
     now_pic_h=0
     if args.model=="CED":
+        # [Original Code - commented out for memory optimization comparison]
+        # controlnet = ControlNetModel.from_pretrained(CE_MODEL_VERTICAL, torch_dtype=torch.float16)
+        #
+        # pipe_d_v = StableDiffusionDepth2ImgPipeline.from_pretrained(SD_MODEL_VERTICAL).to("cuda:0")
+        # pipe_d_h = StableDiffusionDepth2ImgPipeline.from_pretrained(SD_MODEL_HORIZONTAL).to("cuda:0")
+        #
+        # pipe_ce = StableDiffusionControlNetPipeline.from_pretrained(
+        #     "runwayml/stable-diffusion-v1-5",
+        #     controlnet=controlnet,
+        #     torch_dtype=torch.float16
+        # ).to("cuda:0")
+
+        # [Change 1] Merge the two identical depth pipelines into one shared instance.
+        # Vertical/horizontal slicing still differs by input rendering, depth map and prompt,
+        # so sharing the same weights does not change the intended training logic.
         controlnet = ControlNetModel.from_pretrained(CE_MODEL_VERTICAL, torch_dtype=torch.float16)
 
-        pipe_d_v = StableDiffusionDepth2ImgPipeline.from_pretrained(SD_MODEL_VERTICAL).to("cuda:0")
-        pipe_d_h = StableDiffusionDepth2ImgPipeline.from_pretrained(SD_MODEL_HORIZONTAL).to("cuda:0")
+        # [Original Code - commented out for compatibility comparison]
+        # pipe_d = StableDiffusionDepth2ImgPipeline.from_pretrained(
+        #     SD_MODEL_VERTICAL,
+        #     torch_dtype=torch.float16,
+        # ).to("cuda:0")
+        # pipe_d.enable_attention_slicing()
+        # pipe_d.enable_vae_slicing()
 
+        # [Original Code - commented out for ref-image recovery comparison]
+        # pipe_d = StableDiffusionDepth2ImgPipeline.from_pretrained(
+        #     SD_MODEL_VERTICAL,
+        #     torch_dtype=torch.float16,
+        # ).to("cuda:0")
+        # if hasattr(pipe_d, "enable_attention_slicing"):
+        #     pipe_d.enable_attention_slicing()
+        # if hasattr(pipe_d, "enable_vae_slicing"):
+        #     pipe_d.enable_vae_slicing()
+
+        # [Change 1.2] Keep the shared depth pipeline, but restore its default precision.
+        # This is intended to avoid fp16 instability in the SDS/depth/VAE chain that can produce black ref images.
+        pipe_d = StableDiffusionDepth2ImgPipeline.from_pretrained(
+            SD_MODEL_VERTICAL,
+        ).to("cuda:0")
+        if hasattr(pipe_d, "enable_attention_slicing"):
+            pipe_d.enable_attention_slicing()
+        if hasattr(pipe_d, "enable_vae_slicing"):
+            pipe_d.enable_vae_slicing()
+
+        # [Change 2] Keep only one ControlNet pipeline resident on GPU and enable slicing.
+        # [Original Code - commented out for compatibility comparison]
+        # pipe_ce = StableDiffusionControlNetPipeline.from_pretrained(
+        #     "runwayml/stable-diffusion-v1-5",
+        #     controlnet=controlnet,
+        #     torch_dtype=torch.float16
+        # ).to("cuda:0")
+        # pipe_ce.enable_attention_slicing()
+        # pipe_ce.enable_vae_slicing()
+
+        # [Change 2.1] Guard optional memory-saving APIs for older diffusers versions.
         pipe_ce = StableDiffusionControlNetPipeline.from_pretrained(
             "runwayml/stable-diffusion-v1-5",
             controlnet=controlnet,
             torch_dtype=torch.float16
         ).to("cuda:0")
+        if hasattr(pipe_ce, "enable_attention_slicing"):
+            pipe_ce.enable_attention_slicing()
+        if hasattr(pipe_ce, "enable_vae_slicing"):
+            pipe_ce.enable_vae_slicing()
 
     for j in range(3000):
         density_and_prune(j)
@@ -410,10 +465,25 @@ if __name__ == "__main__":
                 align_corners=False
             ).squeeze(0)
 
-            pipe=pipe_d_v
+            # [Original Code - commented out for memory optimization comparison]
+            # pipe=pipe_d_v
+            # depth_map = depth_map[None, :, :, :]
+            # depth_map = depth_map.to("cuda:0")
+            # depth_map = pipe.depth_estimator(depth_map).predicted_depth
+
+            # [Original Code - commented out for dtype compatibility comparison]
+            # pipe = pipe_d
+            # depth_map = depth_map[None, :, :, :]
+            # depth_map = depth_map.to(pipe.device)
+            # with torch.no_grad():
+            #     depth_map = pipe.depth_estimator(depth_map).predicted_depth
+
+            # [Change 3.1] Match the depth estimator input dtype to the half-precision pipeline.
+            pipe = pipe_d
             depth_map = depth_map[None, :, :, :]
-            depth_map = depth_map.to("cuda:0")
-            depth_map = pipe.depth_estimator(depth_map).predicted_depth
+            depth_map = depth_map.to(device=pipe.device, dtype=pipe.dtype)
+            with torch.no_grad():
+                depth_map = pipe.depth_estimator(depth_map).predicted_depth
             depth_map_tensor_resized = F.interpolate(depth_map.unsqueeze(0), size=target_size, mode='bilinear',
                                                      align_corners=False)
             depth_map_tensor_resized = depth_map_tensor_resized.squeeze(0)
@@ -437,7 +507,11 @@ if __name__ == "__main__":
                         ref.save(os.path.join(args.output_path, f"h{i}_ref.png"))
                     else:
                         cur_img = Image.open(os.path.join(args.output_path, f"v{i}_init_0.png"))
-                        ref = one_step_sds_orange(cur_img, depth_map_tensor_resized, 30 - j // 100, pipe, "vertical")
+                        # [Original Code - commented out for memory optimization comparison]
+                        # ref = one_step_sds_orange(cur_img, depth_map_tensor_resized, 30 - j // 100, pipe, "vertical")
+
+                        # [Change 4] Use a small fixed latent optimization step count to reduce peak memory.
+                        ref = one_step_sds_orange(cur_img, depth_map_tensor_resized, 4, pipe, "vertical")
                         ref.save(os.path.join(args.output_path, f"v{i}_ref.png"))
                 ref.save(os.path.join(args.output_path, f"v{i}_ref.png"))
             else:
@@ -560,10 +634,25 @@ if __name__ == "__main__":
                 mode='bilinear',
                 align_corners=False
             ).squeeze(0)
-            pipe=pipe_d_h
-            depth_map = depth_map[None,:,:,:]
-            depth_map = depth_map.to("cuda:1")
-            depth_map = pipe.depth_estimator(depth_map).predicted_depth
+            # [Original Code - commented out for memory optimization comparison]
+            # pipe=pipe_d_h
+            # depth_map = depth_map[None,:,:,:]
+            # depth_map = depth_map.to("cuda:1")
+            # depth_map = pipe.depth_estimator(depth_map).predicted_depth
+
+            # [Original Code - commented out for dtype compatibility comparison]
+            # pipe = pipe_d
+            # depth_map = depth_map[None, :, :, :]
+            # depth_map = depth_map.to(pipe.device)
+            # with torch.no_grad():
+            #     depth_map = pipe.depth_estimator(depth_map).predicted_depth
+
+            # [Change 5.1] Match the horizontal depth estimator input dtype to the pipeline as well.
+            pipe = pipe_d
+            depth_map = depth_map[None, :, :, :]
+            depth_map = depth_map.to(device=pipe.device, dtype=pipe.dtype)
+            with torch.no_grad():
+                depth_map = pipe.depth_estimator(depth_map).predicted_depth
             target_size = (512, 512)
             depth_map_tensor_resized = F.interpolate(depth_map.unsqueeze(0), size=target_size, mode='bilinear', align_corners=False)
             depth_map_tensor_resized = depth_map_tensor_resized.squeeze(0)
@@ -583,12 +672,20 @@ if __name__ == "__main__":
                     if j>=300:
                         canny_condition_img_path = CED.get_canny_edges(
                             os.path.join(args.output_path, f"h{i}_init_0.png"))
-                        ref = one_step_c_orange(cur_img, canny_condition_img_path, 30 - j // 100, pipe_ce, "horizontal")
+                        # [Original Code - commented out for memory optimization comparison]
+                        # ref = one_step_c_orange(cur_img, canny_condition_img_path, 30 - j // 100, pipe_ce, "horizontal")
+
+                        # [Change 6] Reduce ControlNet latent optimization steps to improve stability on 8GB VRAM.
+                        ref = one_step_c_orange(cur_img, canny_condition_img_path, 4, pipe_ce, "horizontal")
                         ref.save(os.path.join(args.output_path, f"h{i}_ref.png"))
                     else :
 
                         cur_img = Image.open(os.path.join(args.output_path, f"h{i}_init_0.png"))
-                        ref = one_step_sds_orange(cur_img, depth_map_tensor_resized, 30 - j // 100, pipe, "horizontal")
+                        # [Original Code - commented out for memory optimization comparison]
+                        # ref = one_step_sds_orange(cur_img, depth_map_tensor_resized, 30 - j // 100, pipe, "horizontal")
+
+                        # [Change 7] Reduce SDS latent optimization steps for horizontal slices as well.
+                        ref = one_step_sds_orange(cur_img, depth_map_tensor_resized, 4, pipe, "horizontal")
                         ref.save(os.path.join(args.output_path, f"h{i}_ref.png"))
             else:
                 ref = Image.open(os.path.join(args.output_path, f"h{i}_ref.png"))

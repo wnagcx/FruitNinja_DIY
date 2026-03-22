@@ -1,0 +1,20 @@
+# 忽略 Windows 附加数据流文件（解决你当前报错的核心）
+*:Zone.Identifier
+
+# 忽略带有独立 .git 仓库的第三方模块/文件夹
+diffusers/
+gaussian-splatting/
+simple-knn/
+
+# 忽略 Python 缓存文件
+__pycache__/
+*.pyc
+
+# 忽略本地跑出来的大文件、模型和日志（保持 GitHub 仓库轻量）
+outputs/
+log/
+ours/
+local_models/
+build/
+dist/
+*.egg-info/

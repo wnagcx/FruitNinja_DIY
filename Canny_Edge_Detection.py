@@ -29,33 +29,39 @@ def get_canny_edges(image_path, low_threshold=100, high_threshold=200):
 # edge_image = get_canny_edges("test_orange.jpg")=
 
 def generate_with_controlnet(edge_image_path, prompt= "A highly detailed, hyper-realistic macro photography of a fresh orange cross section, juicy, 4k resolution,solid white background"):
-    print("正在加载 ControlNet 边缘模型和 Stable Diffusion...")
-    # 1. 加载专门认“边缘线稿”的 ControlNet 模型
-    controlnet = ControlNetModel.from_pretrained(
-        "lllyasviel/sd-controlnet-canny",
-        torch_dtype=torch.float16
-    )
+    # [Original Code - commented out for memory optimization comparison]
+    # print("正在加载 ControlNet 边缘模型和 Stable Diffusion...")
+    # # 1. 加载专门认“边缘线稿”的 ControlNet 模型
+    # controlnet = ControlNetModel.from_pretrained(
+    #     "lllyasviel/sd-controlnet-canny",
+    #     torch_dtype=torch.float16
+    # )
+    #
+    # pipe = StableDiffusionControlNetPipeline.from_pretrained(
+    #     "runwayml/stable-diffusion-v1-5",
+    #     controlnet=controlnet,
+    #     torch_dtype=torch.float16
+    # ).to("cuda")  # 送入显卡加速
+    #
+    # edge_image = Image.open(edge_image_path)
+    #
+    # print("AI 开始根据线稿作画...")
+    # image = pipe(
+    #     prompt=prompt,
+    #     image=edge_image,
+    #     num_inference_steps=20,  # 绘画步数
+    #     guidance_scale=7.5,  # 听从提示词的程度
+    #     controlnet_conditioning_scale=0.5 #听从线稿的程度
+    # ).images[0]
+    #
+    # image.save("./ai_generate/ai_generated_orange.png")
+    # print("生成完毕！已保存为 ai_generated_orange.png")
+    # return os.path.abspath("ai_generate/ai_generated_orange.png")
 
-    pipe = StableDiffusionControlNetPipeline.from_pretrained(
-        "runwayml/stable-diffusion-v1-5",
-        controlnet=controlnet,
-        torch_dtype=torch.float16
-    ).to("cuda")  # 送入显卡加速
-
-    edge_image = Image.open(edge_image_path)
-
-    print("AI 开始根据线稿作画...")
-    image = pipe(
-        prompt=prompt,
-        image=edge_image,
-        num_inference_steps=20,  # 绘画步数
-        guidance_scale=7.5,  # 听从提示词的程度
-        controlnet_conditioning_scale=0.5 #听从线稿的程度
-    ).images[0]
-
-    image.save("./ai_generate/ai_generated_orange.png")
-    print("生成完毕！已保存为 ai_generated_orange.png")
-    return os.path.abspath("ai_generate/ai_generated_orange.png")
+    # [Change 12] Do not instantiate another ControlNet pipeline here.
+    # The caller should reuse the already-loaded pipe_ce in train_orange_demo.py.
+    print("跳过在 Canny_Edge_Detection.py 中重复加载 ControlNet，直接复用已有边缘图。")
+    return os.path.abspath(edge_image_path)
 # 测试运行（假设上一步生成的线稿叫 orange_edges.png）
 # prompt = "A highly detailed, hyper-realistic macro photography of a fresh orange cross section, juicy, 4k resolution"
 # generate_with_controlnet("orange_edges.png", prompt)
