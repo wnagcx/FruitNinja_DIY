@@ -1,10 +1,10 @@
 import argparse
 import os
 import sys
-from array import array
 from pathlib import Path
 
 import bpy
+import numpy as np
 from mathutils import Vector
 
 
@@ -12,6 +12,9 @@ MODEL_OBJECT_NAME = "fruit_model"
 SLICE_PLANE_NAME = "slice_plane"
 VIEWER_COLLECTION_NAME = "FruitNinjaViewer"
 POINT_NODE_GROUP_NAME = "FruitPointCloudNodes"
+POINT_MATERIAL_NAME = "FruitPointMaterial"
+POINT_COLOR_ATTRIBUTE = "viewer_color"
+SH_C0 = 0.28209479177387814
 
 WATCH_PATH = ""
 POLL_SECONDS = 2.0
@@ -20,6 +23,7 @@ AUTO_SAVE_BLEND = False
 LAST_MTIME = None
 LAST_PLANE_STATE = None
 SOURCE_COORDS = None
+SOURCE_COLORS = None
 
 
 def parse_runtime_args() -> argparse.Namespace:
@@ -70,18 +74,174 @@ def cleanup_previous_model() -> None:
     clear_mesh(MODEL_OBJECT_NAME)
 
 
+def parse_vertex_header(filepath: str) -> tuple[int, list[tuple[str, str]], int]:
+    vertex_count = None
+    properties = []
+    in_vertex_element = False
+    offset = 0
+
+    with open(filepath, "rb") as handle:
+        while True:
+            line = handle.readline()
+            if not line:
+                raise RuntimeError(f"Unexpected EOF while reading PLY header: {filepath}")
+            offset += len(line)
+            text = line.decode("latin1").strip()
+
+            if text.startswith("format ") and "binary_little_endian" not in text:
+                raise RuntimeError(f"Only binary_little_endian PLY is supported: {filepath}")
+
+            if text.startswith("element "):
+                _, element_name, count_text = text.split()
+                in_vertex_element = element_name == "vertex"
+                if in_vertex_element:
+                    vertex_count = int(count_text)
+                    properties = []
+                continue
+
+            if text.startswith("property ") and in_vertex_element:
+                _, value_type, property_name = text.split()
+                properties.append((property_name, value_type))
+                continue
+
+            if text == "end_header":
+                break
+
+    if vertex_count is None:
+        raise RuntimeError(f"No vertex element found in PLY header: {filepath}")
+
+    return vertex_count, properties, offset
+
+
+def property_dtype(value_type: str) -> np.dtype:
+    mapping = {
+        "float": np.float32,
+        "float32": np.float32,
+        "double": np.float64,
+        "float64": np.float64,
+        "uchar": np.uint8,
+        "uint8": np.uint8,
+        "char": np.int8,
+        "int8": np.int8,
+        "ushort": np.uint16,
+        "uint16": np.uint16,
+        "short": np.int16,
+        "int16": np.int16,
+        "uint": np.uint32,
+        "uint32": np.uint32,
+        "int": np.int32,
+        "int32": np.int32,
+    }
+    if value_type not in mapping:
+        raise RuntimeError(f"Unsupported PLY property type: {value_type}")
+    return mapping[value_type]
+
+
+def load_ply_data(filepath: str) -> tuple[np.ndarray, np.ndarray]:
+    vertex_count, properties, offset = parse_vertex_header(filepath)
+    dtype = np.dtype([(name, property_dtype(value_type)) for name, value_type in properties])
+
+    with open(filepath, "rb") as handle:
+        handle.seek(offset)
+        data = np.fromfile(handle, dtype=dtype, count=vertex_count)
+
+    coords = np.stack(
+        [
+            data["x"].astype(np.float32, copy=False),
+            data["y"].astype(np.float32, copy=False),
+            data["z"].astype(np.float32, copy=False),
+        ],
+        axis=1,
+    )
+
+    if {"f_dc_0", "f_dc_1", "f_dc_2"}.issubset(data.dtype.names):
+        rgb = np.stack(
+            [
+                data["f_dc_0"].astype(np.float32, copy=False),
+                data["f_dc_1"].astype(np.float32, copy=False),
+                data["f_dc_2"].astype(np.float32, copy=False),
+            ],
+            axis=1,
+        )
+        rgb = np.clip(rgb * SH_C0 + 0.5, 0.0, 1.0)
+    else:
+        rgb = np.full((vertex_count, 3), 0.8, dtype=np.float32)
+
+    alpha = np.ones((vertex_count, 1), dtype=np.float32)
+    colors = np.concatenate([rgb, alpha], axis=1)
+    return coords, colors
+
+
+def center_coords_xy(coords: np.ndarray) -> np.ndarray:
+    centered = coords.copy()
+    min_xy = centered[:, :2].min(axis=0)
+    max_xy = centered[:, :2].max(axis=0)
+    centered[:, 0] -= 0.5 * (min_xy[0] + max_xy[0])
+    centered[:, 1] -= 0.5 * (min_xy[1] + max_xy[1])
+    return centered
+
+
+def ensure_color_attribute(mesh: bpy.types.Mesh, colors: np.ndarray) -> None:
+    color_attribute = mesh.color_attributes.get(POINT_COLOR_ATTRIBUTE)
+    if color_attribute is None:
+        color_attribute = mesh.color_attributes.new(
+            name=POINT_COLOR_ATTRIBUTE,
+            type="FLOAT_COLOR",
+            domain="POINT",
+        )
+
+    if len(colors) == 0:
+        return
+
+    color_attribute.data.foreach_set("color", colors.astype(np.float32, copy=False).ravel())
+
+
+def build_mesh_from_arrays(name: str, coords: np.ndarray, colors: np.ndarray) -> bpy.types.Mesh:
+    mesh = bpy.data.meshes.new(name)
+    vertex_count = len(coords)
+    mesh.vertices.add(vertex_count)
+    if vertex_count > 0:
+        mesh.vertices.foreach_set("co", coords.astype(np.float32, copy=False).ravel())
+    mesh.update()
+    ensure_color_attribute(mesh, colors)
+    return mesh
+
+
+def create_point_material() -> bpy.types.Material:
+    material = bpy.data.materials.get(POINT_MATERIAL_NAME)
+    if material is None:
+        material = bpy.data.materials.new(name=POINT_MATERIAL_NAME)
+        material.use_nodes = True
+        node_tree = material.node_tree
+        nodes = node_tree.nodes
+        links = node_tree.links
+        nodes.clear()
+
+        output = nodes.new("ShaderNodeOutputMaterial")
+        output.location = (300, 0)
+
+        principled = nodes.new("ShaderNodeBsdfPrincipled")
+        principled.location = (50, 0)
+        principled.inputs["Roughness"].default_value = 0.6
+
+        attribute = nodes.new("ShaderNodeAttribute")
+        attribute.location = (-220, 0)
+        attribute.attribute_name = POINT_COLOR_ATTRIBUTE
+
+        links.new(attribute.outputs["Color"], principled.inputs["Base Color"])
+        links.new(attribute.outputs["Color"], principled.inputs["Emission Color"])
+        principled.inputs["Emission Strength"].default_value = 0.2
+        links.new(principled.outputs["BSDF"], output.inputs["Surface"])
+
+    return material
+
+
 def import_ply(filepath: str, collection: bpy.types.Collection) -> bpy.types.Object:
     cleanup_previous_model()
-    before = set(bpy.data.objects.keys())
-    bpy.ops.wm.ply_import(filepath=filepath)
-    imported_names = [name for name in bpy.data.objects.keys() if name not in before]
-    if not imported_names:
-        raise RuntimeError(f"PLY import created no object: {filepath}")
-
-    imported_obj = bpy.data.objects[imported_names[0]]
-    imported_obj.name = MODEL_OBJECT_NAME
-    if imported_obj.data is not None:
-        imported_obj.data.name = MODEL_OBJECT_NAME
+    coords, colors = load_ply_data(filepath)
+    coords = center_coords_xy(coords)
+    mesh = build_mesh_from_arrays(MODEL_OBJECT_NAME, coords, colors)
+    imported_obj = bpy.data.objects.new(MODEL_OBJECT_NAME, mesh)
 
     ensure_object_in_collection(imported_obj, collection)
     imported_obj.location = (0.0, 0.0, 0.0)
@@ -90,27 +250,6 @@ def import_ply(filepath: str, collection: bpy.types.Collection) -> bpy.types.Obj
     imported_obj.show_instancer_for_viewport = False
     imported_obj.show_instancer_for_render = False
     return imported_obj
-
-
-def center_model_xy(model: bpy.types.Object) -> None:
-    if model.data is None or len(model.data.vertices) == 0:
-        return
-
-    bbox_min_x = min(v.co.x for v in model.data.vertices)
-    bbox_max_x = max(v.co.x for v in model.data.vertices)
-    bbox_min_y = min(v.co.y for v in model.data.vertices)
-    bbox_max_y = max(v.co.y for v in model.data.vertices)
-
-    offset_x = -0.5 * (bbox_min_x + bbox_max_x)
-    offset_y = -0.5 * (bbox_min_y + bbox_max_y)
-
-    if abs(offset_x) < 1e-9 and abs(offset_y) < 1e-9:
-        return
-
-    for vert in model.data.vertices:
-        vert.co.x += offset_x
-        vert.co.y += offset_y
-    model.data.update()
 
 
 def create_pointcloud_node_group() -> bpy.types.GeometryNodeTree:
@@ -134,8 +273,13 @@ def create_pointcloud_node_group() -> bpy.types.GeometryNodeTree:
     mesh_to_points.mode = "VERTICES"
     mesh_to_points.inputs["Radius"].default_value = 0.008
 
+    set_material = group.nodes.new("GeometryNodeSetMaterial")
+    set_material.location = (-200, 0)
+    set_material.inputs["Material"].default_value = create_point_material()
+
     links.new(node_input.outputs["Geometry"], mesh_to_points.inputs["Mesh"])
-    links.new(mesh_to_points.outputs["Points"], node_output.inputs["Geometry"])
+    links.new(mesh_to_points.outputs["Points"], set_material.inputs["Geometry"])
+    links.new(set_material.outputs["Geometry"], node_output.inputs["Geometry"])
 
     return group
 
@@ -194,13 +338,6 @@ def frame_model(model: bpy.types.Object) -> None:
     model.select_set(False)
 
 
-def extract_source_coords(model: bpy.types.Object) -> array:
-    vertex_count = len(model.data.vertices)
-    coords = array("f", [0.0]) * (vertex_count * 3)
-    model.data.vertices.foreach_get("co", coords)
-    return coords
-
-
 def plane_state(plane: bpy.types.Object) -> tuple[float, ...]:
     location = plane.location
     rotation = plane.rotation_euler
@@ -219,35 +356,29 @@ def plane_state(plane: bpy.types.Object) -> tuple[float, ...]:
 
 
 def apply_plane_cut(model: bpy.types.Object, plane: bpy.types.Object) -> None:
-    global SOURCE_COORDS
-    if SOURCE_COORDS is None:
+    global SOURCE_COORDS, SOURCE_COLORS
+    if SOURCE_COORDS is None or SOURCE_COLORS is None:
         return
 
     normal = plane.matrix_world.to_3x3() @ Vector((0.0, 0.0, 1.0))
     normal.normalize()
     point_on_plane = plane.matrix_world.translation
 
-    filtered = array("f")
-    coords = SOURCE_COORDS
-    for i in range(0, len(coords), 3):
-        x = coords[i]
-        y = coords[i + 1]
-        z = coords[i + 2]
-        signed_distance = (
-            normal.x * (x - point_on_plane.x)
-            + normal.y * (y - point_on_plane.y)
-            + normal.z * (z - point_on_plane.z)
-        )
-        if signed_distance >= 0.0:
-            filtered.extend((x, y, z))
+    normal_np = np.array([normal.x, normal.y, normal.z], dtype=np.float32)
+    point_np = np.array([point_on_plane.x, point_on_plane.y, point_on_plane.z], dtype=np.float32)
+    signed_distances = (SOURCE_COORDS - point_np) @ normal_np
+    mask = signed_distances >= 0.0
+    filtered_coords = SOURCE_COORDS[mask]
+    filtered_colors = SOURCE_COLORS[mask]
 
     mesh = model.data
     mesh.clear_geometry()
-    kept_vertices = len(filtered) // 3
+    kept_vertices = len(filtered_coords)
     if kept_vertices > 0:
         mesh.vertices.add(kept_vertices)
-        mesh.vertices.foreach_set("co", filtered)
+        mesh.vertices.foreach_set("co", filtered_coords.astype(np.float32, copy=False).ravel())
     mesh.update()
+    ensure_color_attribute(mesh, filtered_colors)
 
 
 def setup_scene(model: bpy.types.Object, collection: bpy.types.Collection) -> None:
@@ -290,11 +421,18 @@ def describe_source(filepath: str) -> str:
 
 
 def load_model(filepath: str) -> None:
-    global SOURCE_COORDS
+    global SOURCE_COORDS, SOURCE_COLORS
     collection = get_or_create_collection(VIEWER_COLLECTION_NAME)
     model = import_ply(filepath, collection)
-    center_model_xy(model)
-    SOURCE_COORDS = extract_source_coords(model)
+    mesh = model.data
+    SOURCE_COORDS = np.empty((len(mesh.vertices), 3), dtype=np.float32)
+    mesh.vertices.foreach_get("co", SOURCE_COORDS.ravel())
+    color_attribute = mesh.color_attributes.get(POINT_COLOR_ATTRIBUTE)
+    if color_attribute is not None:
+        SOURCE_COLORS = np.empty((len(color_attribute.data), 4), dtype=np.float32)
+        color_attribute.data.foreach_get("color", SOURCE_COLORS.ravel())
+    else:
+        SOURCE_COLORS = np.ones((len(mesh.vertices), 4), dtype=np.float32)
     setup_scene(model, collection)
     maybe_save_blend()
     print(f"[FruitNinjaViewer] Loaded model: {filepath}")
