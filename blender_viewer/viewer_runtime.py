@@ -1,21 +1,25 @@
 import argparse
 import os
 import sys
+from array import array
 from pathlib import Path
 
 import bpy
+from mathutils import Vector
 
 
 MODEL_OBJECT_NAME = "fruit_model"
 SLICE_PLANE_NAME = "slice_plane"
-SLICE_VOLUME_NAME = "slice_volume"
 VIEWER_COLLECTION_NAME = "FruitNinjaViewer"
+POINT_NODE_GROUP_NAME = "FruitPointCloudNodes"
 
 WATCH_PATH = ""
 POLL_SECONDS = 2.0
 BLEND_PATH = ""
 AUTO_SAVE_BLEND = False
 LAST_MTIME = None
+LAST_PLANE_STATE = None
+SOURCE_COORDS = None
 
 
 def parse_runtime_args() -> argparse.Namespace:
@@ -83,7 +87,46 @@ def import_ply(filepath: str, collection: bpy.types.Collection) -> bpy.types.Obj
     imported_obj.location = (0.0, 0.0, 0.0)
     imported_obj.rotation_euler = (0.0, 0.0, 0.0)
     imported_obj.scale = (1.0, 1.0, 1.0)
+    imported_obj.show_instancer_for_viewport = False
+    imported_obj.show_instancer_for_render = False
     return imported_obj
+
+
+def create_pointcloud_node_group() -> bpy.types.GeometryNodeTree:
+    group = bpy.data.node_groups.get(POINT_NODE_GROUP_NAME)
+    if group is None:
+        group = bpy.data.node_groups.new(POINT_NODE_GROUP_NAME, "GeometryNodeTree")
+        group.interface.new_socket("Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
+        group.interface.new_socket("Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
+
+    group.nodes.clear()
+    links = group.links
+
+    node_input = group.nodes.new("NodeGroupInput")
+    node_input.location = (-700, 0)
+
+    node_output = group.nodes.new("NodeGroupOutput")
+    node_output.location = (-50, 0)
+
+    mesh_to_points = group.nodes.new("GeometryNodeMeshToPoints")
+    mesh_to_points.location = (-450, 0)
+    mesh_to_points.mode = "VERTICES"
+    mesh_to_points.inputs["Radius"].default_value = 0.008
+
+    links.new(node_input.outputs["Geometry"], mesh_to_points.inputs["Mesh"])
+    links.new(mesh_to_points.outputs["Points"], node_output.inputs["Geometry"])
+
+    return group
+
+
+def ensure_vertex_instances(model: bpy.types.Object, collection: bpy.types.Collection) -> None:
+    node_group = create_pointcloud_node_group()
+    modifier = model.modifiers.get("FruitPointCloud")
+    if modifier is None:
+        modifier = model.modifiers.new(name="FruitPointCloud", type="NODES")
+    modifier.node_group = node_group
+    model.display_type = "TEXTURED"
+    model.hide_render = False
 
 
 def create_slice_plane(collection: bpy.types.Collection) -> bpy.types.Object:
@@ -109,32 +152,10 @@ def create_slice_plane(collection: bpy.types.Collection) -> bpy.types.Object:
     return plane
 
 
-def create_slice_volume(collection: bpy.types.Collection, plane: bpy.types.Object) -> bpy.types.Object:
-    volume = bpy.data.objects.get(SLICE_VOLUME_NAME)
-    if volume is None:
-        bpy.ops.mesh.primitive_cube_add(size=2.0, location=(0.0, 0.0, 0.0))
-        volume = bpy.context.active_object
-        volume.name = SLICE_VOLUME_NAME
-
-    ensure_object_in_collection(volume, collection)
-    volume.parent = plane
-    volume.matrix_parent_inverse = plane.matrix_world.inverted()
-    volume.location = (0.0, 0.0, 50.0)
-    volume.rotation_euler = (0.0, 0.0, 0.0)
-    volume.scale = (100.0, 100.0, 50.0)
-    volume.display_type = "WIRE"
-    volume.hide_render = True
-    volume.hide_set(False)
-    return volume
-
-
-def ensure_boolean_modifier(model: bpy.types.Object, slice_volume: bpy.types.Object) -> None:
-    modifier = model.modifiers.get("FruitNinjaSlice")
-    if modifier is None:
-        modifier = model.modifiers.new(name="FruitNinjaSlice", type="BOOLEAN")
-    modifier.operation = "INTERSECT"
-    modifier.solver = "EXACT"
-    modifier.object = slice_volume
+def remove_legacy_slice_volume() -> None:
+    legacy = bpy.data.objects.get("slice_volume")
+    if legacy is not None:
+        bpy.data.objects.remove(legacy, do_unlink=True)
 
 
 def frame_model(model: bpy.types.Object) -> None:
@@ -152,14 +173,73 @@ def frame_model(model: bpy.types.Object) -> None:
     model.select_set(False)
 
 
+def extract_source_coords(model: bpy.types.Object) -> array:
+    vertex_count = len(model.data.vertices)
+    coords = array("f", [0.0]) * (vertex_count * 3)
+    model.data.vertices.foreach_get("co", coords)
+    return coords
+
+
+def plane_state(plane: bpy.types.Object) -> tuple[float, ...]:
+    location = plane.location
+    rotation = plane.rotation_euler
+    scale = plane.scale
+    return (
+        round(location.x, 6),
+        round(location.y, 6),
+        round(location.z, 6),
+        round(rotation.x, 6),
+        round(rotation.y, 6),
+        round(rotation.z, 6),
+        round(scale.x, 6),
+        round(scale.y, 6),
+        round(scale.z, 6),
+    )
+
+
+def apply_plane_cut(model: bpy.types.Object, plane: bpy.types.Object) -> None:
+    global SOURCE_COORDS
+    if SOURCE_COORDS is None:
+        return
+
+    normal = plane.matrix_world.to_3x3() @ Vector((0.0, 0.0, 1.0))
+    normal.normalize()
+    point_on_plane = plane.matrix_world.translation
+
+    filtered = array("f")
+    coords = SOURCE_COORDS
+    for i in range(0, len(coords), 3):
+        x = coords[i]
+        y = coords[i + 1]
+        z = coords[i + 2]
+        signed_distance = (
+            normal.x * (x - point_on_plane.x)
+            + normal.y * (y - point_on_plane.y)
+            + normal.z * (z - point_on_plane.z)
+        )
+        if signed_distance >= 0.0:
+            filtered.extend((x, y, z))
+
+    mesh = model.data
+    mesh.clear_geometry()
+    kept_vertices = len(filtered) // 3
+    if kept_vertices > 0:
+        mesh.vertices.add(kept_vertices)
+        mesh.vertices.foreach_set("co", filtered)
+    mesh.update()
+
+
 def setup_scene(model: bpy.types.Object, collection: bpy.types.Collection) -> None:
+    global LAST_PLANE_STATE
     scene = bpy.context.scene
     scene.unit_settings.system = "METRIC"
     scene.render.engine = "BLENDER_EEVEE_NEXT"
+    ensure_vertex_instances(model, collection)
 
     plane = create_slice_plane(collection)
-    volume = create_slice_volume(collection, plane)
-    ensure_boolean_modifier(model, volume)
+    remove_legacy_slice_volume()
+    LAST_PLANE_STATE = plane_state(plane)
+    apply_plane_cut(model, plane)
 
     if bpy.context.scene.camera is None:
         bpy.ops.object.camera_add(location=(3.0, -3.0, 2.0), rotation=(1.1, 0.0, 0.78))
@@ -179,15 +259,17 @@ def maybe_save_blend() -> None:
 
 
 def load_model(filepath: str) -> None:
+    global SOURCE_COORDS
     collection = get_or_create_collection(VIEWER_COLLECTION_NAME)
     model = import_ply(filepath, collection)
+    SOURCE_COORDS = extract_source_coords(model)
     setup_scene(model, collection)
     maybe_save_blend()
     print(f"[FruitNinjaViewer] Loaded model: {filepath}")
 
 
 def watch_for_updates() -> float:
-    global LAST_MTIME
+    global LAST_MTIME, LAST_PLANE_STATE
     try:
         current_mtime = os.path.getmtime(WATCH_PATH)
     except OSError:
@@ -197,6 +279,15 @@ def watch_for_updates() -> float:
     if LAST_MTIME is None or current_mtime > LAST_MTIME:
         LAST_MTIME = current_mtime
         load_model(WATCH_PATH)
+        return POLL_SECONDS
+
+    model = bpy.data.objects.get(MODEL_OBJECT_NAME)
+    plane = bpy.data.objects.get(SLICE_PLANE_NAME)
+    if model is not None and plane is not None and SOURCE_COORDS is not None:
+        current_plane_state = plane_state(plane)
+        if LAST_PLANE_STATE != current_plane_state:
+            LAST_PLANE_STATE = current_plane_state
+            apply_plane_cut(model, plane)
 
     return POLL_SECONDS
 
