@@ -92,6 +92,27 @@ def import_ply(filepath: str, collection: bpy.types.Collection) -> bpy.types.Obj
     return imported_obj
 
 
+def center_model_xy(model: bpy.types.Object) -> None:
+    if model.data is None or len(model.data.vertices) == 0:
+        return
+
+    bbox_min_x = min(v.co.x for v in model.data.vertices)
+    bbox_max_x = max(v.co.x for v in model.data.vertices)
+    bbox_min_y = min(v.co.y for v in model.data.vertices)
+    bbox_max_y = max(v.co.y for v in model.data.vertices)
+
+    offset_x = -0.5 * (bbox_min_x + bbox_max_x)
+    offset_y = -0.5 * (bbox_min_y + bbox_max_y)
+
+    if abs(offset_x) < 1e-9 and abs(offset_y) < 1e-9:
+        return
+
+    for vert in model.data.vertices:
+        vert.co.x += offset_x
+        vert.co.y += offset_y
+    model.data.update()
+
+
 def create_pointcloud_node_group() -> bpy.types.GeometryNodeTree:
     group = bpy.data.node_groups.get(POINT_NODE_GROUP_NAME)
     if group is None:
@@ -258,14 +279,26 @@ def maybe_save_blend() -> None:
         bpy.ops.wm.save_as_mainfile(filepath=str(target))
 
 
+def describe_source(filepath: str) -> str:
+    name = Path(filepath).name
+    if name == "gs_fill.ply":
+        return "gs_fill"
+    if name.startswith("orange_demo_epoch_") and name.endswith(".ply"):
+        epoch = name.removeprefix("orange_demo_epoch_").removesuffix(".ply")
+        return f"epoch {epoch}"
+    return name
+
+
 def load_model(filepath: str) -> None:
     global SOURCE_COORDS
     collection = get_or_create_collection(VIEWER_COLLECTION_NAME)
     model = import_ply(filepath, collection)
+    center_model_xy(model)
     SOURCE_COORDS = extract_source_coords(model)
     setup_scene(model, collection)
     maybe_save_blend()
     print(f"[FruitNinjaViewer] Loaded model: {filepath}")
+    print(f"[FruitNinjaViewer] Active source: {describe_source(filepath)}")
 
 
 def watch_for_updates() -> float:

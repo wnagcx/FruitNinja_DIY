@@ -94,6 +94,8 @@ if __name__ == "__main__":
     parser.add_argument("--flip", action="store_true")
     parser.add_argument("--model",type=str,default="local")
     parser.add_argument("--input_path",type=str,default=None,required=False)
+    parser.add_argument("--viewer_live", action="store_true", default=False)
+    parser.add_argument("--viewer_save_every_views", type=int, default=10)
 
     args = parser.parse_args()
 
@@ -253,6 +255,20 @@ if __name__ == "__main__":
     steps_per_c = 3
 
     pos = gaussians.get_xyz
+    viewer_view_counter = 0
+
+
+    def save_viewer_snapshot(tag="latest"):
+        if not args.viewer_live or args.output_path is None:
+            return
+        tmp_path = os.path.join(args.output_path, "viewer_latest.tmp.ply")
+        final_path = os.path.join(args.output_path, "viewer_latest.ply")
+        gaussians.save_ply(tmp_path)
+        os.replace(tmp_path, final_path)
+        print(f"Saved viewer snapshot ({tag}) to {final_path}")
+
+
+    save_viewer_snapshot("initial")
 
 
     def training_step(gaussians, loss, grad_update_mask=None, viewspace_point_tensor=None, visibility_filter=None):
@@ -543,6 +559,9 @@ if __name__ == "__main__":
             output_radii[mask] = raddi
             visibility_filter = output_radii > 0
             training_step(gaussians, total_loss, mask, init_screen_points, visibility_filter)
+            viewer_view_counter += 1
+            if args.viewer_live and viewer_view_counter % max(args.viewer_save_every_views, 1) == 0:
+                save_viewer_snapshot(f"view_step_{viewer_view_counter}")
 
         # ==========================================
         # 循环 2: Horizontal views
@@ -716,6 +735,9 @@ if __name__ == "__main__":
             output_radii[mask_suf] = raddi
             visibility_filter = output_radii > 0
             training_step(gaussians, total_loss, mask_suf, init_screen_points, visibility_filter)
+            viewer_view_counter += 1
+            if args.viewer_live and viewer_view_counter % max(args.viewer_save_every_views, 1) == 0:
+                save_viewer_snapshot(f"view_step_{viewer_view_counter}")
 
         # ==========================================
         # 循环 3: Original views (gaussians_ori)
@@ -819,6 +841,11 @@ if __name__ == "__main__":
                 total_loss.backward()
                 visibility_filter = radii > 0
                 training_step(gaussians, total_loss, None, init_screen_points, visibility_filter)
+                viewer_view_counter += 1
+                if args.viewer_live and viewer_view_counter % max(args.viewer_save_every_views, 1) == 0:
+                    save_viewer_snapshot(f"view_step_{viewer_view_counter}")
+
+        save_viewer_snapshot(f"iteration_{j}")
 
         if j > 1 and j % 10 == 0:
             print("Saving epoch")
