@@ -20,6 +20,7 @@ WATCH_PATH = ""
 POLL_SECONDS = 2.0
 BLEND_PATH = ""
 AUTO_SAVE_BLEND = False
+COLOR_MODE = "raw"
 LAST_MTIME = None
 LAST_PLANE_STATE = None
 SOURCE_COORDS = None
@@ -38,6 +39,11 @@ def parse_runtime_args() -> argparse.Namespace:
     parser.add_argument("--poll-seconds", type=float, default=2.0)
     parser.add_argument("--blend-path", default="")
     parser.add_argument("--auto-save-blend", action="store_true")
+    parser.add_argument(
+        "--color-mode",
+        choices=["raw", "boosted", "grayscale_opacity"],
+        default="raw",
+    )
     return parser.parse_args(argv)
 
 
@@ -167,7 +173,17 @@ def load_ply_data(filepath: str) -> tuple[np.ndarray, np.ndarray]:
     else:
         rgb = np.full((vertex_count, 3), 0.8, dtype=np.float32)
 
-    alpha = np.ones((vertex_count, 1), dtype=np.float32)
+    if "opacity" in data.dtype.names:
+        opacity = data["opacity"].astype(np.float32, copy=False)
+        alpha = (1.0 / (1.0 + np.exp(-opacity))).reshape(-1, 1)
+    else:
+        alpha = np.ones((vertex_count, 1), dtype=np.float32)
+
+    if COLOR_MODE == "boosted":
+        rgb = np.clip((rgb - 0.5) * 1.8 + 0.5, 0.0, 1.0)
+    elif COLOR_MODE == "grayscale_opacity":
+        rgb = np.repeat(alpha, 3, axis=1)
+
     colors = np.concatenate([rgb, alpha], axis=1)
     return coords, colors
 
@@ -464,16 +480,18 @@ def watch_for_updates() -> float:
 
 
 def bootstrap() -> None:
-    global WATCH_PATH, POLL_SECONDS, BLEND_PATH, AUTO_SAVE_BLEND
+    global WATCH_PATH, POLL_SECONDS, BLEND_PATH, AUTO_SAVE_BLEND, COLOR_MODE
     args = parse_runtime_args()
     WATCH_PATH = args.watch_path
     POLL_SECONDS = max(args.poll_seconds, 0.5)
     BLEND_PATH = args.blend_path
     AUTO_SAVE_BLEND = args.auto_save_blend
+    COLOR_MODE = args.color_mode
 
     print("[FruitNinjaViewer] Runtime started")
     print(f"[FruitNinjaViewer] watch_path={WATCH_PATH}")
     print(f"[FruitNinjaViewer] poll_seconds={POLL_SECONDS}")
+    print(f"[FruitNinjaViewer] color_mode={COLOR_MODE}")
 
     bpy.app.timers.register(watch_for_updates, first_interval=0.1, persistent=True)
 

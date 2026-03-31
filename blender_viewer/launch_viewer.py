@@ -72,6 +72,8 @@ def build_command(args: argparse.Namespace, watch_path: Path) -> list[str]:
             str(args.poll_seconds),
             "--blend-path",
             wsl_to_windows(blend_path),
+            "--color-mode",
+            args.color_mode,
         ]
     )
 
@@ -116,6 +118,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Save viewer.blend after first scene setup.",
     )
+    parser.add_argument(
+        "--color-mode",
+        choices=["raw", "boosted", "grayscale_opacity"],
+        default="raw",
+        help="Color display mode for the point cloud.",
+    )
     return parser.parse_args()
 
 
@@ -128,6 +136,7 @@ def main() -> int:
     print(f"  watch_path = {watch_path}")
     print(f"  blend_path = {Path(args.blend_path).expanduser().resolve()}")
     print(f"  blender    = {Path(args.blender_exe).expanduser()}")
+    print(f"  color_mode = {args.color_mode}")
 
     completed = subprocess.run(command)
     return completed.returncode
